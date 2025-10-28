@@ -47,11 +47,14 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
       break
     case .ended:
       // Interruption ended - restart all audio engines
-      guard let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt else {
-        return
+      // Check if we should resume (if option is present and true, or if option is missing)
+      var shouldResume = true
+      if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
+        let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+        shouldResume = options.contains(.shouldResume)
       }
-      let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-      if options.contains(.shouldResume) {
+      
+      if shouldResume {
         restartAudioEngines()
       }
     @unknown default:
