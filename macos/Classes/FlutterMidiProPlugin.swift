@@ -26,14 +26,6 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
   }
   
   private func setupAudioSessionNotifications() {
-    #if os(iOS)
-    NotificationCenter.default.addObserver(
-      self,
-      selector: #selector(handleAudioSessionInterruption),
-      name: AVAudioSession.interruptionNotification,
-      object: AVAudioSession.sharedInstance()
-    )
-    #else
     // On macOS, we also listen for interruptions but they're less common
     // AVAudioSession is available on macOS 10.15+
     if #available(macOS 10.15, *) {
@@ -44,7 +36,6 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
         object: AVAudioSession.sharedInstance()
       )
     }
-    #endif
   }
   
   @objc private func handleAudioSessionInterruption(notification: Notification) {
