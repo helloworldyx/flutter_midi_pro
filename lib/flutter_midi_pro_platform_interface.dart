@@ -45,7 +45,11 @@ abstract class FlutterMidiProPlatform extends PlatformInterface {
   }
 
   // ==================== 【新增的 MIDI 文件控制接口】 ====================
-  Future<void> playMidiFile(int sfId, String path) {
+  Stream<int> get onPlaybackComplete {
+    throw UnimplementedError('onPlaybackComplete has not been implemented.');
+  }
+
+  Future<void> playMidiFile(int sfId, String path, {bool loop = true}) {
     throw UnimplementedError('playMidiFile() has not been implemented.');
   }
 

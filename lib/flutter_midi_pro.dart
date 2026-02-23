@@ -97,12 +97,16 @@ class MidiPro {
 
   // ==================== 【新增的 MIDI 文件控制 API】 ====================
   
-  /// 播放本地的 .mid 文件。底层已锁定无限循环。
+  /// 监听播放完成事件（只在 loop=false 时有效，自然结束触发抛出 sfId）
+  Stream<int> get onPlaybackComplete => FlutterMidiProPlatform.instance.onPlaybackComplete;
+
+  /// 播放本地的 .mid 文件。
   Future<void> playMidiFile({
     required String path,
     int sfId = 1,
+    bool loop = true,
   }) async {
-    return FlutterMidiProPlatform.instance.playMidiFile(sfId, path);
+    return FlutterMidiProPlatform.instance.playMidiFile(sfId, path, loop: loop);
   }
 
   /// 暂停 MIDI 播放（保持当前时间戳）

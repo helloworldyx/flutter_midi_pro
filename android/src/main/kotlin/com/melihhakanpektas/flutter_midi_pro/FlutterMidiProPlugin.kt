@@ -11,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.Job
 
 /** FlutterMidiProPlugin */
 class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
@@ -44,7 +46,10 @@ class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
 
         // ==================== 【新增的 MIDI 文件控制 JNI 接口】 ====================
         @JvmStatic
-        private external fun playMidiFile(sfId: Int, path: String)
+        private external fun playMidiFile(sfId: Int, path: String, loop: Boolean)
+
+        @JvmStatic
+        private external fun isMidiPlayerPlaying(sfId: Int): Boolean
 
         @JvmStatic
         private external fun pauseMidiFile(sfId: Int)
@@ -58,6 +63,7 @@ class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
 
     private lateinit var channel : MethodChannel
     private lateinit var flutterPluginBinding: FlutterPlugin.FlutterPluginBinding
+    private val pollingJobs = ConcurrentHashMap<Int, Job>()
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         this.flutterPluginBinding = flutterPluginBinding
@@ -156,9 +162,24 @@ class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
             "playMidiFile" -> {
                 val sfId = call.argument<Int>("sfId")
                 val path = call.argument<String>("path")
+                val loop = call.argument<Boolean>("loop") ?: true
                 if (sfId != null && path != null) {
-                    playMidiFile(sfId, path)
+                    playMidiFile(sfId, path, loop)
                     result.success(null)
+
+                    if (!loop) {
+                        pollingJobs[sfId]?.cancel()
+                        pollingJobs[sfId] = CoroutineScope(Dispatchers.IO).launch {
+                            delay(500) // 稍等引擎启动
+                            while (isMidiPlayerPlaying(sfId)) {
+                                delay(200)
+                            }
+                            // 播放结束
+                            withContext(Dispatchers.Main) {
+                                channel.invokeMethod("onMidiPlayerCompleted", mapOf("sfId" to sfId))
+                            }
+                        }
+                    }
                 } else {
                     result.error("INVALID_ARGUMENT", "sfId and path are required", null)
                 }
@@ -184,6 +205,7 @@ class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
             "stopMidiFile" -> {
                 val sfId = call.argument<Int>("sfId")
                 if (sfId != null) {
+                    pollingJobs[sfId]?.cancel()
                     stopMidiFile(sfId)
                     result.success(null)
                 } else {

@@ -7,6 +7,17 @@ import 'package:flutter_midi_pro/flutter_midi_pro_platform_interface.dart';
 class MethodChannelFlutterMidiPro extends FlutterMidiProPlatform {
   static const MethodChannel _channel = MethodChannel('flutter_midi_pro');
 
+  final StreamController<int> _onPlaybackCompleteController = StreamController<int>.broadcast();
+
+  MethodChannelFlutterMidiPro() {
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onMidiPlayerCompleted') {
+        final int sfId = call.arguments['sfId'] as int;
+        _onPlaybackCompleteController.add(sfId);
+      }
+    });
+  }
+
   @override
   Future<int> loadSoundfont(String path, int bank, int program) async {
     final int sfId = await _channel
@@ -58,8 +69,11 @@ class MethodChannelFlutterMidiPro extends FlutterMidiProPlatform {
 
   // ==================== 【新增的 MIDI 文件控制实现】 ====================
   @override
-  Future<void> playMidiFile(int sfId, String path) async {
-    await _channel.invokeMethod('playMidiFile', {'sfId': sfId, 'path': path});
+  Stream<int> get onPlaybackComplete => _onPlaybackCompleteController.stream;
+
+  @override
+  Future<void> playMidiFile(int sfId, String path, {bool loop = true}) async {
+    await _channel.invokeMethod('playMidiFile', {'sfId': sfId, 'path': path, 'loop': loop});
   }
 
   @override
