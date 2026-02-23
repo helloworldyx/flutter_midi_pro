@@ -7,6 +7,8 @@ std::map<int, fluid_synth_t*> synths = {};
 std::map<int, fluid_audio_driver_t*> drivers = {};
 std::map<int, fluid_settings_t*> settings = {};
 std::map<int, int> soundfonts = {};
+// 【新增】：用于管理每个 synth 对应的 MIDI 播放器
+std::map<int, fluid_player_t*> players = {};
 int nextSfId = 1;
 
 extern "C" JNIEXPORT int JNICALL
@@ -65,8 +67,69 @@ Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_controlChange(
     fluid_synth_cc(synths[sfId], channel, controller, value);
 }
 
+// ==================== 【新增的 MIDI 文件控制模块】 ====================
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_playMidiFile(JNIEnv* env, jclass clazz, jint sfId, jstring path) {
+    // 确保合成器存在
+    if (synths.find(sfId) == synths.end()) return;
+
+    const char *nativePath = env->GetStringUTFChars(path, nullptr);
+
+    // 如果该 sfId 已经有一个播放器在运行，先安全销毁它
+    if (players.find(sfId) != players.end()) {
+        fluid_player_stop(players[sfId]);
+        fluid_player_join(players[sfId]);
+        delete_fluid_player(players[sfId]);
+    }
+
+    // 创建新播放器并绑定到对应的合成器
+    players[sfId] = new_fluid_player(synths[sfId]);
+    fluid_player_add(players[sfId], nativePath);
+
+    // 核心：设置无限循环，完美契合运动节拍器场景
+    fluid_player_set_loop(players[sfId], -1);
+
+    // 启动原生播放引擎
+    fluid_player_play(players[sfId]);
+
+    env->ReleaseStringUTFChars(path, nativePath);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_pauseMidiFile(JNIEnv* env, jclass clazz, jint sfId) {
+    if (players.find(sfId) != players.end()) {
+        fluid_player_stop(players[sfId]);
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_resumeMidiFile(JNIEnv* env, jclass clazz, jint sfId) {
+    if (players.find(sfId) != players.end()) {
+        fluid_player_play(players[sfId]);
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_stopMidiFile(JNIEnv* env, jclass clazz, jint sfId) {
+    if (players.find(sfId) != players.end()) {
+        fluid_player_stop(players[sfId]);
+        fluid_player_join(players[sfId]);
+        delete_fluid_player(players[sfId]);
+        players.erase(sfId);
+    }
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_unloadSoundfont(JNIEnv* env, jclass clazz, jint sfId) {
+    // 【新增】：卸载音色库前，先清理对应的播放器，防止 C++ 内存泄漏崩溃
+    if (players.find(sfId) != players.end()) {
+        fluid_player_stop(players[sfId]);
+        fluid_player_join(players[sfId]);
+        delete_fluid_player(players[sfId]);
+        players.erase(sfId);
+    }
+
     delete_fluid_audio_driver(drivers[sfId]);
     delete_fluid_synth(synths[sfId]);
     synths.erase(sfId);
@@ -76,6 +139,14 @@ Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_unloadSoundfon
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_dispose(JNIEnv* env, jclass clazz) {
+    // 【新增】：全局销毁时，清理所有播放器
+    for (auto const& p : players) {
+        fluid_player_stop(p.second);
+        fluid_player_join(p.second);
+        delete_fluid_player(p.second);
+    }
+    players.clear();
+
     for (auto const& x : synths) {
         delete_fluid_audio_driver(drivers[x.first]);
         delete_fluid_synth(synths[x.first]);

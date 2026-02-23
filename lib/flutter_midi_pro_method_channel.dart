@@ -55,4 +55,25 @@ class MethodChannelFlutterMidiPro extends FlutterMidiProPlatform {
   Future<void> dispose() async {
     await _channel.invokeMethod('dispose');
   }
+
+  // ==================== 【新增的 MIDI 文件控制实现】 ====================
+  @override
+  Future<void> playMidiFile(int sfId, String path) async {
+    await _channel.invokeMethod('playMidiFile', {'sfId': sfId, 'path': path});
+  }
+
+  @override
+  Future<void> pauseMidiFile(int sfId) async {
+    await _channel.invokeMethod('pauseMidiFile', {'sfId': sfId});
+  }
+
+  @override
+  Future<void> resumeMidiFile(int sfId) async {
+    await _channel.invokeMethod('resumeMidiFile', {'sfId': sfId});
+  }
+
+  @override
+  Future<void> stopMidiFile(int sfId) async {
+    await _channel.invokeMethod('stopMidiFile', {'sfId': sfId});
+  }
 }
