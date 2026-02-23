@@ -105,6 +105,10 @@ Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_playMidiFile(
   // 核心：设置无限循环还是只播放一次
   fluid_player_set_loop(players[sfId], loop ? -1 : 0);
 
+  // Channel 9 = GM 打击乐通道，必须在播放前切到 bank 128
+  // 否则 note 36/38/42 会被当作钢琴音符
+  fluid_synth_program_select(synths[sfId], 9, soundfonts[sfId], 128, 0);
+
   // 启动原生播放引擎
   fluid_player_play(players[sfId]);
 
