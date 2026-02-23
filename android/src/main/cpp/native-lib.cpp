@@ -140,6 +140,12 @@ Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_stopMidiFile(
     delete_fluid_player(players[sfId]);
     players.erase(sfId);
   }
+  // 立即切断所有正在发声的音符（尤其是小提琴等长音符）
+  if (synths.find(sfId) != synths.end()) {
+    for (int ch = 0; ch < 16; ++ch) {
+      fluid_synth_all_sounds_off(synths[sfId], ch);
+    }
+  }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
