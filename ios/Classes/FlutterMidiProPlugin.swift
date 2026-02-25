@@ -10,19 +10,32 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
   var soundfontSamplers: [Int: [AVAudioUnitSampler]] = [:]
   var soundfontURLs: [Int: URL] = [:]
   
+  // MIDI Playback properties
+  var midiClient: MIDIClientRef = 0
+  var musicPlayers: [Int: MusicPlayer] = [:]
+  var musicSequences: [Int: MusicSequence] = [:]
+  var midiEndpoints: [Int: MIDIEndpointRef] = [:]
+  var pollingTimers: [Int: Timer] = [:]
+  weak var flutterChannel: FlutterMethodChannel?
+  
   public static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(name: "flutter_midi_pro", binaryMessenger: registrar.messenger())
     let instance = FlutterMidiProPlugin()
+    instance.flutterChannel = channel
     registrar.addMethodCallDelegate(instance, channel: channel)
   }
   
   public override init() {
     super.init()
     setupAudioSessionNotifications()
+    MIDIClientCreate("FlutterMidiProClient" as CFString, nil, nil, &self.midiClient)
   }
   
   deinit {
     NotificationCenter.default.removeObserver(self)
+    if midiClient != 0 {
+      MIDIClientDispose(midiClient)
+    }
   }
   
   private func setupAudioSessionNotifications() {
@@ -43,11 +56,8 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
     
     switch type {
     case .began:
-      // Interruption began - audio engines will be stopped automatically by the system
       break
     case .ended:
-      // Interruption ended - restart all audio engines
-      // Check if we should resume (if option is present and true, or if option is missing)
       var shouldResume = true
       if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
         let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
@@ -124,7 +134,6 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
             return
         }
         soundfontSampler!.forEach { (sampler) in
-            // Sustain'i kapat (CC 64 -> 0) ve anında sesi kes (All Sound Off, CC 120 -> 0)
             for channel in 0...15 {
                 sampler.sendController(64, withValue: 0, onChannel: UInt8(channel))
                 sampler.sendController(120, withValue: 0, onChannel: UInt8(channel))
@@ -188,6 +197,7 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
             result(FlutterError(code: "SOUND_FONT_NOT_FOUND", message: "Soundfont not found", details: nil))
             return
         }
+        internalStopMidiFile(sfId: sfId)
         audioEngines[sfId]?.forEach { (audioEngine) in
             audioEngine.stop()
         }
@@ -196,6 +206,9 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
         soundfontURLs.removeValue(forKey: sfId)
         result(nil)
     case "dispose":
+        for (sfId, _) in audioEngines {
+            internalStopMidiFile(sfId: sfId)
+        }
         audioEngines.forEach { (key, value) in
             value.forEach { (audioEngine) in
                 audioEngine.stop()
@@ -204,9 +217,204 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
         audioEngines = [:]
         soundfontSamplers = [:]
         result(nil)
+    case "playMidiFile":
+        let args = call.arguments as! [String: Any]
+        guard let sfId = args["sfId"] as? Int,
+              let path = args["path"] as? String else {
+            result(FlutterError(code: "INVALID_ARGUMENT", message: "sfId and path are required", details: nil))
+            return
+        }
+        let loop = args["loop"] as? Bool ?? true
+        
+        internalPlayMidiFile(sfId: sfId, path: path, loop: loop, result: result)
+    case "pauseMidiFile":
+        let args = call.arguments as! [String: Any]
+        guard let sfId = args["sfId"] as? Int else {
+            result(FlutterError(code: "INVALID_ARGUMENT", message: "sfId is required", details: nil))
+            return
+        }
+        if let player = musicPlayers[sfId] {
+            var isPlaying: DarwinBoolean = false
+            MusicPlayerIsPlaying(player, &isPlaying)
+            if isPlaying.boolValue {
+                MusicPlayerStop(player)
+            }
+        }
+        result(nil)
+    case "resumeMidiFile":
+        let args = call.arguments as! [String: Any]
+        guard let sfId = args["sfId"] as? Int else {
+            result(FlutterError(code: "INVALID_ARGUMENT", message: "sfId is required", details: nil))
+            return
+        }
+        if let player = musicPlayers[sfId] {
+            MusicPlayerStart(player)
+        }
+        result(nil)
+    case "stopMidiFile":
+        let args = call.arguments as! [String: Any]
+        guard let sfId = args["sfId"] as? Int else {
+            result(FlutterError(code: "INVALID_ARGUMENT", message: "sfId is required", details: nil))
+            return
+        }
+        internalStopMidiFile(sfId: sfId)
+        result(nil)
     default:
       result(FlutterMethodNotImplemented)
         break
     }
+  }
+  
+  // MARK: - MIDI File Helpers
+  
+  private func internalPlayMidiFile(sfId: Int, path: String, loop: Bool, result: FlutterResult) {
+      internalStopMidiFile(sfId: sfId)
+      
+      guard let samplers = soundfontSamplers[sfId] else {
+          result(FlutterError(code: "SOUND_FONT_NOT_FOUND", message: "Soundfont not found for sfId \(sfId)", details: nil))
+          return
+      }
+      
+      var endpoint: MIDIEndpointRef = 0
+      
+      let block: MIDIReadBlock = { packetList, srcConnRefCon in
+          let packets = packetList.pointee
+          
+          withUnsafePointer(to: packets.packet) { tuplePtr in
+              var packetPtr = UnsafeRawPointer(tuplePtr).assumingMemoryBound(to: MIDIPacket.self)
+              
+              for _ in 0 ..< packets.numPackets {
+                  let packet = packetPtr.pointee
+                  
+                  // Copy the data so we can take a buffer pointer to it without mutation
+                  let dataTuple = packet.data
+                  
+                  withUnsafeBytes(of: dataTuple) { bytes in
+                      if packet.length > 0 {
+                          let statusByte = bytes[0]
+                          let channel = Int(statusByte & 0x0F)
+                          
+                          if channel >= 0 && channel < 16, channel < samplers.count {
+                              let sampler = samplers[channel]
+                              let data1 = packet.length > 1 ? bytes[1] : 0
+                              let data2 = packet.length > 2 ? bytes[2] : 0
+                              
+                              sampler.sendMIDIEvent(statusByte, data1: data1, data2: data2)
+                          }
+                      }
+                  }
+                  
+                  let packetSize = MemoryLayout<MIDIPacket>.size - 256 + Int(packet.length)
+                  let offset = (packetSize + 3) & ~3
+                  
+                  // Move to the next packet
+                  packetPtr = UnsafeRawPointer(packetPtr).advanced(by: offset).assumingMemoryBound(to: MIDIPacket.self)
+              }
+          }
+      }
+      
+      var status = MIDIDestinationCreateWithBlock(midiClient, "FlutterMidiProDest" as CFString, &endpoint, block)
+      if status != noErr {
+          result(FlutterError(code: "MIDI_DEST_FAILED", message: "Failed to create MIDI destination \(status)", details: nil))
+          return
+      }
+      midiEndpoints[sfId] = endpoint
+      
+      var sequence: MusicSequence?
+      status = NewMusicSequence(&sequence)
+      guard let seq = sequence, status == noErr else {
+          result(FlutterError(code: "SEQ_CREATE_FAILED", message: "Failed to create sequence", details: nil))
+          return
+      }
+      musicSequences[sfId] = seq
+      
+      let fileURL = URL(fileURLWithPath: path)
+      status = MusicSequenceFileLoad(seq, fileURL as CFURL, .midiType, MusicSequenceLoadFlags.smf_ChannelsToTracks)
+      if status != noErr {
+          result(FlutterError(code: "FILE_LOAD_FAILED", message: "Failed to load midi file", details: nil))
+          return
+      }
+      
+      var trackCount: UInt32 = 0
+      MusicSequenceGetTrackCount(seq, &trackCount)
+      for i in 0..<trackCount {
+          var track: MusicTrack?
+          MusicSequenceGetIndTrack(seq, i, &track)
+          if let trk = track {
+              MusicTrackSetDestMIDIEndpoint(trk, endpoint)
+          }
+      }
+      
+      var player: MusicPlayer?
+      NewMusicPlayer(&player)
+      guard let plyr = player else {
+          result(FlutterError(code: "PLAYER_CREATE_FAILED", message: "Failed to create player", details: nil))
+          return
+      }
+      musicPlayers[sfId] = plyr
+      
+      MusicPlayerSetSequence(plyr, seq)
+      MusicPlayerStart(plyr)
+      
+      result(nil)
+      
+      var seqLength: MusicTimeStamp = 0
+      for i in 0..<trackCount {
+          var track: MusicTrack?
+          MusicSequenceGetIndTrack(seq, i, &track)
+          if let trk = track {
+              var trkLen: MusicTimeStamp = 0
+              var propSz = UInt32(MemoryLayout<MusicTimeStamp>.size)
+              MusicTrackGetProperty(trk, kSequenceTrackProperty_TrackLength, &trkLen, &propSz)
+              seqLength = max(seqLength, trkLen)
+          }
+      }
+      
+      let timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] t in
+          guard let self = self, let p = self.musicPlayers[sfId] else {
+              t.invalidate()
+              return
+          }
+          
+          var isPlaying: DarwinBoolean = false
+          MusicPlayerIsPlaying(p, &isPlaying)
+          var time: MusicTimeStamp = 0
+          MusicPlayerGetTime(p, &time)
+          
+          if !isPlaying.boolValue || time >= seqLength {
+              if loop {
+                  MusicPlayerSetTime(p, 0)
+                  MusicPlayerStart(p)
+              } else {
+                  t.invalidate()
+                  self.pollingTimers.removeValue(forKey: sfId)
+                  DispatchQueue.main.async {
+                      self.flutterChannel?.invokeMethod("onMidiPlayerCompleted", arguments: ["sfId": sfId])
+                  }
+              }
+          }
+      }
+      pollingTimers[sfId] = timer
+  }
+  
+  private func internalStopMidiFile(sfId: Int) {
+      pollingTimers[sfId]?.invalidate()
+      pollingTimers.removeValue(forKey: sfId)
+      
+      if let player = musicPlayers[sfId] {
+          MusicPlayerStop(player)
+          DisposeMusicPlayer(player)
+          musicPlayers.removeValue(forKey: sfId)
+      }
+      
+      if let seq = musicSequences[sfId] {
+          DisposeMusicSequence(seq)
+          musicSequences.removeValue(forKey: sfId)
+      }
+      
+      if let endpoint = midiEndpoints[sfId] {
+          MIDIEndpointDispose(endpoint)
+          midiEndpoints.removeValue(forKey: sfId)
+      }
   }
 }
