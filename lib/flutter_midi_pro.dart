@@ -129,4 +129,30 @@ class MidiPro {
   }) async {
     return FlutterMidiProPlatform.instance.stopMidiFile(sfId);
   }
+
+  // ==================== 【音量控制便利方法】 ====================
+
+  /// 设置单个 MIDI channel 的音量（MIDI CC#7 = Channel Volume）
+  /// [volume] 范围 0.0 ~ 1.0，内部线性映射到 MIDI 值 0 ~ 127
+  /// 复用 controlChange 而非新增 native 方法，降低改动面
+  Future<void> setChannelVolume({
+    required int sfId,
+    required int channel,
+    required double volume,
+  }) {
+    final midiVal = (volume.clamp(0.0, 1.0) * 127).round();
+    return controlChange(controller: 7, value: midiVal, channel: channel, sfId: sfId);
+  }
+
+  /// 批量设置多个 MIDI channel 的音量
+  /// 顺序发送以保证通道顺序一致，调用方无需关心底层 CC#7 细节
+  Future<void> setChannelsVolume({
+    required int sfId,
+    required List<int> channels,
+    required double volume,
+  }) async {
+    for (final ch in channels) {
+      await setChannelVolume(sfId: sfId, channel: ch, volume: volume);
+    }
+  }
 }
