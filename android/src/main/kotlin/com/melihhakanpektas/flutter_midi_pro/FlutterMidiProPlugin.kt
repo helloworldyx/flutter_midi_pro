@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 
 /** FlutterMidiProPlugin */
 class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
@@ -59,6 +60,11 @@ class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
 
         @JvmStatic
         private external fun stopMidiFile(sfId: Int)
+
+        // fluid_player_join 的 JNI 绑定：在 C 层阻塞直到播放结束
+        // 比轮询 isMidiPlayerPlaying 更高效：线程在内核层挂起，0 CPU 占用
+        @JvmStatic
+        private external fun joinMidiFile(sfId: Int)
     }
 
     private lateinit var channel : MethodChannel
@@ -170,13 +176,15 @@ class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
                     if (!loop) {
                         pollingJobs[sfId]?.cancel()
                         pollingJobs[sfId] = CoroutineScope(Dispatchers.IO).launch {
-                            delay(500) // 稍等引擎启动
-                            while (isMidiPlayerPlaying(sfId)) {
-                                delay(200)
-                            }
-                            // 播放结束
-                            withContext(Dispatchers.Main) {
-                                channel.invokeMethod("onMidiPlayerCompleted", mapOf("sfId" to sfId))
+                            // joinMidiFile 在 C 层调用 fluid_player_join()，
+                            // 协程在 IO 线程上挂起，不占用 CPU，替代 200ms while 轮询
+                            joinMidiFile(sfId)
+                            // 协程被 cancel（stopMidiFile 调用时）会从 joinMidiFile 返回，
+                            // 此时 isActive 为 false，不触发 onMidiPlayerCompleted
+                            if (isActive) {
+                                withContext(Dispatchers.Main) {
+                                    channel.invokeMethod("onMidiPlayerCompleted", mapOf("sfId" to sfId))
+                                }
                             }
                         }
                     }

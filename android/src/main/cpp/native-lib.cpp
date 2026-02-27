@@ -176,6 +176,17 @@ Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_isMidiPlayerPl
   return status == FLUID_PLAYER_PLAYING ? JNI_TRUE : JNI_FALSE;
 }
 
+// fluid_player_join 阻塞当前线程直到播放自然结束
+// Kotlin 浏这个方法在 IO 调度器上挂起，不占用 CPU，替代轮询
+extern "C" JNIEXPORT void JNICALL
+Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_joinMidiFile(
+    JNIEnv *env, jclass clazz, jint sfId) {
+  if (players.find(sfId) == players.end())
+    return;
+  // 将当前线程挂起到播放完成，内核层面实现 0 CPU 占用等待
+  fluid_player_join(players[sfId]);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_unloadSoundfont(
     JNIEnv *env, jclass clazz, jint sfId) {
