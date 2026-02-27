@@ -5,7 +5,8 @@ import AVFoundation
 import CoreAudio
 
 public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
-  var audioEngines: [Int: [AVAudioEngine]] = [:]
+  // 每个 soundfont 使用 1 个引擎 + 16 个 sampler 节点，替代原来 16 个独立 AVAudioEngine
+  var audioEngines: [Int: AVAudioEngine] = [:]
   var soundfontIndex = 1
   var soundfontSamplers: [Int: [AVAudioUnitSampler]] = [:]
   var soundfontURLs: [Int: URL] = [:]
@@ -73,14 +74,12 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
   }
   
   private func restartAudioEngines() {
-    for (sfId, engines) in audioEngines {
-      for (index, engine) in engines.enumerated() {
-        if !engine.isRunning {
-          do {
-            try engine.start()
-          } catch {
-            print("Failed to restart audio engine for sfId \(sfId), channel \(index): \(error)")
-          }
+    for (sfId, engine) in audioEngines {
+      if !engine.isRunning {
+        do {
+          try engine.start()
+        } catch {
+          print("Failed to restart audio engine for sfId \(sfId): \(error)")
         }
       }
     }
@@ -94,35 +93,43 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
         let bank = args["bank"] as! Int
         let program = args["program"] as! Int
         let url = URL(fileURLWithPath: path)
+
+        // 单一 AVAudioEngine + 16 个 sampler 节点
+        // 原来 16 个独立引擎的写法会创建 16 个独立的 AudioUnit 图和 I/O 线程，
+        // 合并为 1 个引擎可减少 ~93% 的引擎开销
+        let audioEngine = AVAudioEngine()
+        let mainMixer = audioEngine.mainMixerNode
         var chSamplers: [AVAudioUnitSampler] = []
-        var chAudioEngines: [AVAudioEngine] = []
+
+        let isPercussion = (bank == 128)
+        let bankMSB: UInt8 = isPercussion ? UInt8(kAUSampler_DefaultPercussionBankMSB) : UInt8(kAUSampler_DefaultMelodicBankMSB)
+        let bankLSB: UInt8 = isPercussion ? 0 : UInt8(bank)
+
         for _ in 0...15 {
             let sampler = AVAudioUnitSampler()
-            let audioEngine = AVAudioEngine()
             audioEngine.attach(sampler)
-            audioEngine.connect(sampler, to: audioEngine.mainMixerNode, format:nil)
+            // 所有 sampler 逗通到同一个 mainMixer，共用一个输出链
+            audioEngine.connect(sampler, to: mainMixer, format: nil)
             do {
-                try audioEngine.start()
-            } catch {
-                result(FlutterError(code: "AUDIO_ENGINE_START_FAILED", message: "Failed to start audio engine", details: nil))
-                return
-            }
-            do {
-                let isPercussion = (bank == 128)
-                let bankMSB: UInt8 = isPercussion ? UInt8(kAUSampler_DefaultPercussionBankMSB) : UInt8(kAUSampler_DefaultMelodicBankMSB)
-                let bankLSB: UInt8 = isPercussion ? 0 : UInt8(bank)
-                
                 try sampler.loadSoundBankInstrument(at: url, program: UInt8(program), bankMSB: bankMSB, bankLSB: bankLSB)
             } catch {
                 result(FlutterError(code: "SOUND_FONT_LOAD_FAILED1", message: "Failed to load soundfont", details: nil))
                 return
             }
             chSamplers.append(sampler)
-            chAudioEngines.append(audioEngine)
         }
+
+        // 所有节点 attach 完成后才启动引擎，避免多次引擎重启
+        do {
+            try audioEngine.start()
+        } catch {
+            result(FlutterError(code: "AUDIO_ENGINE_START_FAILED", message: "Failed to start audio engine", details: nil))
+            return
+        }
+
         soundfontSamplers[soundfontIndex] = chSamplers
         soundfontURLs[soundfontIndex] = url
-        audioEngines[soundfontIndex] = chAudioEngines
+        audioEngines[soundfontIndex] = audioEngine
         soundfontIndex += 1
         result(soundfontIndex-1)
     case "stopAllNotes":
@@ -198,9 +205,7 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
             return
         }
         internalStopMidiFile(sfId: sfId)
-        audioEngines[sfId]?.forEach { (audioEngine) in
-            audioEngine.stop()
-        }
+        audioEngines[sfId]?.stop() // 单引擎直接调用 stop()
         audioEngines.removeValue(forKey: sfId)
         soundfontSamplers.removeValue(forKey: sfId)
         soundfontURLs.removeValue(forKey: sfId)
@@ -209,10 +214,9 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
         for (sfId, _) in audioEngines {
             internalStopMidiFile(sfId: sfId)
         }
-        audioEngines.forEach { (key, value) in
-            value.forEach { (audioEngine) in
-                audioEngine.stop()
-            }
+        // 单引擎架构：直接调用 stop()，无需嵌套 forEach
+        audioEngines.forEach { (_, engine) in
+            engine.stop()
         }
         audioEngines = [:]
         soundfontSamplers = [:]
@@ -370,7 +374,9 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
           }
       }
       
-      let timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] t in
+      // 轮询间隔从 100ms 改为 1000ms：减少 90% 的后台 CPU 唤醒
+      // 对于几分钟长的 MIDI 曲，1s 精度完全足够，不影响用户体验
+      let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] t in
           guard let self = self, let p = self.musicPlayers[sfId] else {
               t.invalidate()
               return
