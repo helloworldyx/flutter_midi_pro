@@ -134,6 +134,12 @@ Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_pauseMidiFile(
     JNIEnv *env, jclass clazz, jint sfId) {
   if (players.find(sfId) != players.end()) {
     fluid_player_stop(players[sfId]);
+    // 立即切断所有发声，防止暂停时残响无限拖延
+    if (synths.find(sfId) != synths.end()) {
+      for (int ch = 0; ch < 16; ++ch) {
+        fluid_synth_all_sounds_off(synths[sfId], ch);
+      }
+    }
   }
 }
 

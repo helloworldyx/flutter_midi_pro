@@ -70,6 +70,7 @@ class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
     private lateinit var channel : MethodChannel
     private lateinit var flutterPluginBinding: FlutterPlugin.FlutterPluginBinding
     private val pollingJobs = ConcurrentHashMap<Int, Job>()
+    private val loopStates = ConcurrentHashMap<Int, Boolean>()
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         this.flutterPluginBinding = flutterPluginBinding
@@ -170,17 +171,14 @@ class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
                 val path = call.argument<String>("path")
                 val loop = call.argument<Boolean>("loop") ?: true
                 if (sfId != null && path != null) {
+                    loopStates[sfId] = loop
                     playMidiFile(sfId, path, loop)
                     result.success(null)
 
                     if (!loop) {
                         pollingJobs[sfId]?.cancel()
                         pollingJobs[sfId] = CoroutineScope(Dispatchers.IO).launch {
-                            // joinMidiFile 在 C 层调用 fluid_player_join()，
-                            // 协程在 IO 线程上挂起，不占用 CPU，替代 200ms while 轮询
                             joinMidiFile(sfId)
-                            // 协程被 cancel（stopMidiFile 调用时）会从 joinMidiFile 返回，
-                            // 此时 isActive 为 false，不触发 onMidiPlayerCompleted
                             if (isActive) {
                                 withContext(Dispatchers.Main) {
                                     channel.invokeMethod("onMidiPlayerCompleted", mapOf("sfId" to sfId))
@@ -195,6 +193,7 @@ class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
             "pauseMidiFile" -> {
                 val sfId = call.argument<Int>("sfId")
                 if (sfId != null) {
+                    pollingJobs[sfId]?.cancel()
                     pauseMidiFile(sfId)
                     result.success(null)
                 } else {
@@ -206,6 +205,19 @@ class FlutterMidiProPlugin: FlutterPlugin, MethodCallHandler {
                 if (sfId != null) {
                     resumeMidiFile(sfId)
                     result.success(null)
+                    
+                    val loop = loopStates[sfId] ?: true
+                    if (!loop) {
+                        pollingJobs[sfId]?.cancel()
+                        pollingJobs[sfId] = CoroutineScope(Dispatchers.IO).launch {
+                            joinMidiFile(sfId)
+                            if (isActive) {
+                                withContext(Dispatchers.Main) {
+                                    channel.invokeMethod("onMidiPlayerCompleted", mapOf("sfId" to sfId))
+                                }
+                            }
+                        }
+                    }
                 } else {
                     result.error("INVALID_ARGUMENT", "sfId is required", null)
                 }

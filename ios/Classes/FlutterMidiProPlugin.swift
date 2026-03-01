@@ -17,6 +17,7 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
   var musicSequences: [Int: MusicSequence] = [:]
   var midiEndpoints: [Int: MIDIEndpointRef] = [:]
   var pollingTimers: [Int: Timer] = [:]
+  var userPaused: [Int: Bool] = [:]
   weak var flutterChannel: FlutterMethodChannel?
   
   public static func register(with registrar: FlutterPluginRegistrar) {
@@ -237,11 +238,21 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
             result(FlutterError(code: "INVALID_ARGUMENT", message: "sfId is required", details: nil))
             return
         }
+        userPaused[sfId] = true
         if let player = musicPlayers[sfId] {
             var isPlaying: DarwinBoolean = false
             MusicPlayerIsPlaying(player, &isPlaying)
             if isPlaying.boolValue {
                 MusicPlayerStop(player)
+            }
+            if let samplers = soundfontSamplers[sfId] {
+                samplers.forEach { (sampler) in
+                    for channel in 0...15 {
+                        sampler.sendController(120, withValue: 0, onChannel: UInt8(channel)) // All Sound Off
+                        sampler.sendController(123, withValue: 0, onChannel: UInt8(channel)) // All Notes Off
+                        sampler.sendController(64, withValue: 0, onChannel: UInt8(channel)) // Sustain Off
+                    }
+                }
             }
         }
         result(nil)
@@ -251,6 +262,7 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
             result(FlutterError(code: "INVALID_ARGUMENT", message: "sfId is required", details: nil))
             return
         }
+        userPaused[sfId] = false
         if let player = musicPlayers[sfId] {
             MusicPlayerStart(player)
         }
@@ -374,11 +386,15 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
           }
       }
       
+      userPaused[sfId] = false
       // 轮询间隔从 100ms 改为 1000ms：减少 90% 的后台 CPU 唤醒
       // 对于几分钟长的 MIDI 曲，1s 精度完全足够，不影响用户体验
       let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] t in
           guard let self = self, let p = self.musicPlayers[sfId] else {
               t.invalidate()
+              return
+          }
+          if self.userPaused[sfId] == true {
               return
           }
           
@@ -406,6 +422,7 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
   private func internalStopMidiFile(sfId: Int) {
       pollingTimers[sfId]?.invalidate()
       pollingTimers.removeValue(forKey: sfId)
+      userPaused.removeValue(forKey: sfId)
       
       if let player = musicPlayers[sfId] {
           MusicPlayerStop(player)
