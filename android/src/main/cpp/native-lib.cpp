@@ -133,12 +133,21 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_pauseMidiFile(
     JNIEnv *env, jclass clazz, jint sfId) {
   if (players.find(sfId) != players.end()) {
+    // 先将增益降为 0，让当前音频缓冲帧输出静音
+    // 避免 all_sounds_off 在波形非零点硬截止产生 click/pop 杂音
+    if (synths.find(sfId) != synths.end()) {
+      fluid_synth_set_gain(synths[sfId], 0.0f);
+    }
+    // 等待至少一个音频渲染周期（period-size=64 @ 44.1kHz ≈ 1.5ms）
+    // 5ms 留足安全余量，确保静音帧已被 AudioTrack 消费
+    usleep(5000);
     fluid_player_stop(players[sfId]);
-    // 立即切断所有发声，防止暂停时残响无限拖延
     if (synths.find(sfId) != synths.end()) {
       for (int ch = 0; ch < 16; ++ch) {
         fluid_synth_all_sounds_off(synths[sfId], ch);
       }
+      // 恢复增益，为后续 resume 做准备
+      fluid_synth_set_gain(synths[sfId], 1.0f);
     }
   }
 }
@@ -156,17 +165,23 @@ Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_resumeMidiFile
 extern "C" JNIEXPORT void JNICALL
 Java_com_melihhakanpektas_flutter_1midi_1pro_FlutterMidiProPlugin_stopMidiFile(
     JNIEnv *env, jclass clazz, jint sfId) {
+  // 同 pause 逻辑：先静音再硬截止，防止 click/pop
+  if (synths.find(sfId) != synths.end()) {
+    fluid_synth_set_gain(synths[sfId], 0.0f);
+  }
+  usleep(5000);
   if (players.find(sfId) != players.end()) {
     fluid_player_stop(players[sfId]);
     fluid_player_join(players[sfId]);
     delete_fluid_player(players[sfId]);
     players.erase(sfId);
   }
-  // 立即切断所有正在发声的音符
   if (synths.find(sfId) != synths.end()) {
     for (int ch = 0; ch < 16; ++ch) {
       fluid_synth_all_sounds_off(synths[sfId], ch);
     }
+    // 恢复增益（stop 后 synth 仍可被复用于下次 playMidiFile）
+    fluid_synth_set_gain(synths[sfId], 1.0f);
   }
   // 销毁 audio driver，释放实时音频线程 + AudioTrack
   destroy_driver(sfId);

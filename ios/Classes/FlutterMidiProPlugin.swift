@@ -240,6 +240,14 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
         }
         userPaused[sfId] = true
         if let player = musicPlayers[sfId] {
+            // 先将混音器输出音量降为 0，避免后续 MusicPlayerStop 在波形非零点
+            // 硬截止产生 click/pop 杂音
+            if let engine = audioEngines[sfId] {
+                engine.mainMixerNode.outputVolume = 0
+            }
+            // 等待至少一帧音频渲染周期（~5ms），确保静音帧已被 AudioUnit 输出
+            Thread.sleep(forTimeInterval: 0.005)
+            
             var isPlaying: DarwinBoolean = false
             MusicPlayerIsPlaying(player, &isPlaying)
             if isPlaying.boolValue {
@@ -253,6 +261,10 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
                         sampler.sendController(64, withValue: 0, onChannel: UInt8(channel)) // Sustain Off
                     }
                 }
+            }
+            // 恢复音量，为后续 resume 做准备
+            if let engine = audioEngines[sfId] {
+                engine.mainMixerNode.outputVolume = 1
             }
         }
         result(nil)
@@ -425,9 +437,20 @@ public class FlutterMidiProPlugin: NSObject, FlutterPlugin {
       userPaused.removeValue(forKey: sfId)
       
       if let player = musicPlayers[sfId] {
+          // 同 pause 逻辑：先静音再硬截止，防止 click/pop 杂音
+          if let engine = audioEngines[sfId] {
+              engine.mainMixerNode.outputVolume = 0
+          }
+          Thread.sleep(forTimeInterval: 0.005)
+          
           MusicPlayerStop(player)
           DisposeMusicPlayer(player)
           musicPlayers.removeValue(forKey: sfId)
+          
+          // 恢复音量（engine 仍会被复用于下次 playMidiFile）
+          if let engine = audioEngines[sfId] {
+              engine.mainMixerNode.outputVolume = 1
+          }
       }
       
       if let seq = musicSequences[sfId] {
